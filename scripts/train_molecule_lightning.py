@@ -239,6 +239,7 @@ class MoleculeModule(pl.LightningModule):
         self.valid_mae /= self.n_valid
         outputs["reports"].valid_mae = self.valid_mae
         reports = parse_reports(self.outputs.reports)
+        print(reports)
 
         # TODO: all this logging and checkpointing should somewhere else...
         '''
