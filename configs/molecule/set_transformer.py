@@ -71,7 +71,7 @@ def load(config, **unused_kwargs):
         dim_hidden=config.hidden_dim,
         n_enc_layers=config.n_enc_layers,
         n_dec_layers=config.n_dec_layers,
-        num_heads=config.n_heads,
+        num_heads=config.num_heads,
         num_inducing_points=config.n_inducing_points,
         ln=config.layer_norm,
     )
