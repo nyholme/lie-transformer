@@ -10,6 +10,7 @@ setup(
     install_requires=[
         "torch>=1.6.0",
         "torchvision>=0.7.0",
+        "pytorch-lightning>=1.4",
         "tensorboard",
         "numpy",
         "attrdict",
