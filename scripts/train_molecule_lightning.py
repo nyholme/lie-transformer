@@ -22,15 +22,12 @@ from tqdm import tqdm
 from eqv_transformer.train_tools import (
     log_tensorboard,
     parse_reports,
-    print_reports,
     log_reports,
     load_checkpoint,
     save_checkpoint,
     delete_checkpoint,
     ExponentialMovingAverage,
-    get_component,
     nested_to,
-    param_count,
     get_component,
     get_average_norm,
     param_count,
@@ -321,6 +318,11 @@ def main():
     config.num_species = num_species
     config.charge_scale = charge_scale
     config.ds_stats = ds_stats
+
+    print("num_species", num_species)
+    print("charge_scale", charge_scale)
+    print("ds_stats", ds_stats)
+    exit()
 
     # Load model
     model, model_name = fet.load(config.model_config, config)
