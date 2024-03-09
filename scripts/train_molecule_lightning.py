@@ -151,7 +151,8 @@ class MoleculeModule(pl.LightningModule):
                 "Activation initialisation not implemented for LightningModule"
             )
         if self.config.log_train_values:
-            raise NotImplementedError("Logging train values not implemented for LightningModule")
+            print("NOTENOTENOTE: log_train_values is set to True")
+            #raise NotImplementedError("Logging train values not implemented for LightningModule")
         if self.config.debug:
             raise NotImplementedError("Debugging not implemented for LightningModule")
         if self.config.parameter_count:
