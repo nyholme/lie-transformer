@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from torch import optim
 from torch.utils.tensorboard import SummaryWriter
+import pytorch_lightning as pl
 
 import forge
 from forge import flags
@@ -134,8 +135,11 @@ flags.DEFINE_boolean(
 
 # @forge.debug_on(Exception)
 def main():
+### v main()
     # Parse flags
     config = forge.config()
+    print(config.__dict__['__flags'])
+    #exit()
 
     # Load data
     dataloaders, num_species, charge_scale, ds_stats, data_name = fet.load(
@@ -170,7 +174,8 @@ def main():
 
     # Print flags
     fet.print_flags()
-
+###
+### v configure_optimizers
     # Setup optimizer
     model_params = model.predictor.parameters()
 
@@ -182,7 +187,6 @@ def main():
         eps=1e-8,
     )
     # model_opt = torch.optim.SGD(model_params, lr=opt_learning_rate)
-
     # Cosine annealing learning rate
     if config.lr_schedule == "cosine":
         cos = cosLr(config.train_epochs)
@@ -210,7 +214,8 @@ def main():
         raise ValueError(
             f"{config.lr_schedule} is not a recognised learning rate schedule"
         )
-
+###
+### v main()
     num_params = param_count(model)
     if config.parameter_count:
         for (name, parameter) in model.predictor.named_parameters():
@@ -260,7 +265,8 @@ def main():
 
     else:
         print(f"{model_name} parameters: {num_params:.5e}")
-
+###
+### v on fit start
     # set up results folders
     results_folder_name = osp.join(
         data_name,
@@ -363,20 +369,26 @@ def main():
 
         for name, tracked_module in activation_tracked:
             tracked_module.register_forward_hook(partial(save_activation, name))
-
+###
+### on_train_start
     # Training
     start_t = time.perf_counter()
 
     iters_per_epoch = len(dataloaders["train"])
     last_valid_loss = 1000.0
+###
     for epoch in tqdm(range(start_epoch, config.train_epochs + 1)):
         model.train()
 
         for batch_idx, data in enumerate(dataloaders["train"]):
+### v transfer_batch_to_device
             data = {k: v.to(device) for k, v in data.items()}
+###
 
             model_opt.zero_grad()
+### v training_step
             outputs = model(data, compute_loss=True)
+###
 
             outputs.loss.backward()
             if config.clip_grad:
@@ -416,7 +428,9 @@ def main():
             if batch_idx % config.evaluate_every == 0:
                 model.eval()
                 with torch.no_grad():
+### v on_validation_epoch_start
                     valid_mae = 0.0
+###
                     for data in dataloaders["valid"]:
                         data = {k: v.to(device) for k, v in data.items()}
                         outputs = model(data, compute_loss=True)
@@ -584,7 +598,7 @@ def main():
 
         # Save the reports
         dd.io.save(logdir + "/results_dict.h5", report_all)
-
+### v on_train_epoch_end
         # Save a checkpoint
         if epoch % config.save_check_points == 0:
             save_checkpoint(
@@ -597,7 +611,8 @@ def main():
             )
             if config.only_store_last_checkpoint:
                 delete_checkpoint(checkpoint_name, epoch - config.save_check_points)
-
+###
+### v on_fit_end
     save_checkpoint(
         checkpoint_name,
         "final",
@@ -606,7 +621,7 @@ def main():
         lr_schedule,
         outputs.loss,
     )
-
+###
 
 if __name__ == "__main__":
     main()

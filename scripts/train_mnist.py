@@ -1,56 +1,24 @@
-import sys
-from os import path as osp
-import time
-from math import sqrt
-from itertools import chain
-from functools import partial
-
+import gzip
+import os
+from collections import defaultdict
+import pickle
+import numpy as np
 import torch
-import torch.nn as nn
 from torch import optim
+from torch.utils import data as data_utils
 from torch.utils.tensorboard import SummaryWriter
 import pytorch_lightning as pl
-
-import forge
 from forge import flags
+import forge
 import forge.experiment_tools as fet
-from copy import deepcopy
-from collections import defaultdict
-import deepdish as dd
-from tqdm import tqdm
 
-from eqv_transformer.train_tools import (
-    log_tensorboard,
-    parse_reports,
-    log_reports,
-    load_checkpoint,
-    save_checkpoint,
-    delete_checkpoint,
-    ExponentialMovingAverage,
-    nested_to,
-    get_component,
-    get_average_norm,
-    param_count,
-    parameter_analysis,
-)
 
-from eqv_transformer.molecule_predictor import MoleculePredictor
-from eqv_transformer.multihead_neural import MultiheadLinear
-from lie_conv.utils import Pass, Expression
-from lie_conv.masked_batchnorm import MaskBatchNormNd
+
+# have not looked these over
 from oil.utils.utils import cosLr
+from eqv_transformer.train_tools import parse_reports, param_count
 
 
-if torch.cuda.is_available():
-    device = "cuda"
-    # device = "cpu"
-else:
-    device = "cpu"
-
-#####################################################################################################################
-# Command line flags
-#####################################################################################################################
-# Directories
 flags.DEFINE_string("data_dir", "data/", "Path to data directory")
 flags.DEFINE_string(
     "results_dir", "checkpoints/", "Top directory for all experimental results."
@@ -58,11 +26,11 @@ flags.DEFINE_string(
 
 # Configuration files to load
 flags.DEFINE_string(
-    "data_config", "configs/molecule/qm9_data.py", "Path to a data config file."
+    "data_config", "configs/mnist/mnist_data.py", "Path to a data config file."
 )
 flags.DEFINE_string(
     "model_config",
-    "configs/molecule/set_transformer.py",
+    "configs/mnist/eqv_transformer_model.py",
     "Path to a model config file.",
 )
 # Job management
@@ -81,7 +49,8 @@ flags.DEFINE_integer(
     10,
     "frequency with which to save checkpoints, in number of epochs.",
 )
-flags.DEFINE_boolean("log_train_values", True, "Logs train values if True.")
+# TODO: might want to implement this and turn it on
+flags.DEFINE_boolean("log_train_values", False, "Logs train values if True.")
 flags.DEFINE_float(
     "ema_alpha", 0.99, "Alpha coefficient for exponential moving average of train logs."
 )
@@ -100,12 +69,6 @@ flags.DEFINE_string(
 flags.DEFINE_boolean(
     "parameter_count", False, "If True, print model parameter count and exit"
 )
-flags.DEFINE_boolean("debug", False, "Enable additional telemetry for debugging")
-flags.DEFINE_boolean(
-    "init_activations",
-    False,
-    "produce initialisation activation histograms the activations of specified modules through training",
-)
 flags.DEFINE_boolean("profile_model", False, "Run profiling code on model and exit")
 flags.DEFINE_float(
     "lr_floor", 0, "minimum multiplicative factor of the learning rate in annealing"
@@ -121,15 +84,75 @@ flags.DEFINE_boolean(
     False,
     "If True, deletes last checkpoint when saving current checkpoint",
 )
-flags.DEFINE_boolean(
-    "clip_grad",
-    False,
-    "If True, clip gradient L2-norms at 1.",
-)
 
-#####################################################################################################################
+class TensorDatasetWithConstant(data_utils.TensorDataset):
+    def __init__(self, constant, tensors):
+        super().__init__(*tensors)
+        self.constant = constant
+    
+    def __getitem__(self, index):
+        tensor_item = super().__getitem__(index)
+        return self.constant, *tensor_item
+        
 
-class MoleculeModule(pl.LightningModule):
+# copied from https://github.com/jonkhler/s2cnn/blob/b75efee458686e7d7ecb4c337402c668ede0dece/examples/mnist/run.py
+def load_data(path, batch_size, n_splits=1):
+
+    with gzip.open(path, 'rb') as f:
+        dataset = pickle.load(f)
+
+    #train_data = torch.from_numpy(
+    #    dataset["train"]["images"][:, None, :, :].astype(np.float32))
+    #train_labels = torch.from_numpy(
+    #    dataset["train"]["labels"].astype(np.int64))
+
+    train_p = torch.from_numpy(
+        dataset["train"]["p"].astype(np.float32))
+    train_v = torch.from_numpy(
+        dataset["train"]["v"].astype(np.float32))
+    train_m = torch.from_numpy(
+        dataset["train"]["m"].astype(bool))
+    train_labels = torch.from_numpy(
+        dataset["train"]["labels"].astype(np.int64))
+    
+    # because I forgot to half labels on gendata side
+    train_labels, _ = torch.tensor_split(train_labels, 2, dim=0)
+
+    # TODO normalize dataset
+    # mean = train_data.mean()
+    # stdv = train_data.std()
+    for i, d in enumerate([train_p, train_v, train_m, train_labels]):
+        print(i, d.shape)
+
+    #train_dataset = data_utils.TensorDataset(train_p, train_v, train_m, train_labels)
+    train_dataset = TensorDatasetWithConstant(constant=train_p[0], tensors=(train_v, train_m, train_labels))
+    train_loader = data_utils.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+    #test_data = torch.from_numpy(
+    #    dataset["test"]["images"][:, None, :, :].astype(np.float32))
+    #test_labels = torch.from_numpy(
+    #    dataset["test"]["labels"].astype(np.int64))
+
+    test_p = torch.from_numpy(
+        dataset["test"]["p"].astype(np.float32))
+    test_v = torch.from_numpy(
+        dataset["test"]["v"].astype(np.float32))
+    test_m = torch.from_numpy(
+        dataset["test"]["m"].astype(bool))
+    test_labels = torch.from_numpy(
+        dataset["test"]["labels"].astype(np.int64))
+
+    # because I forgot to half labels on gendata side
+    test_labels = torch.tensor_split(test_labels, 2, dim=0)[0]
+
+    #test_dataset = data_utils.TensorDataset(test_p, test_v, test_m, test_labels)
+    test_dataset = TensorDatasetWithConstant(constant=test_p[0], tensors=(test_v, test_m, test_labels))
+    test_loader = data_utils.DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
+
+    return train_loader, test_loader, train_dataset, test_dataset
+
+
+class SphericalMNISTModule(pl.LightningModule):
     def __init__(self, model, config, summary_writer, checkpoint_name, n_train, n_valid):
         super().__init__()
         self.model = model
@@ -141,20 +164,10 @@ class MoleculeModule(pl.LightningModule):
         self.n_valid = n_valid
         self.valid_mae = None
         self.outputs = None
+        self.loss_fn = torch.nn.CrossEntropyLoss()
 
-        if self.config.clip_grad:
-            raise NotImplementedError(
-                "Gradient clipping not implemented for LightningModule"
-            )
-        if self.config.init_activations:
-            raise NotImplementedError(
-                "Activation initialisation not implemented for LightningModule"
-            )
         if self.config.log_train_values:
-            print("NOTENOTENOTE: log_train_values is set to True")
-            #raise NotImplementedError("Logging train values not implemented for LightningModule")
-        if self.config.debug:
-            raise NotImplementedError("Debugging not implemented for LightningModule")
+            raise NotImplementedError("Logging train values not implemented for LightningModule")
         if self.config.parameter_count:
             raise NotImplementedError("Parameter counting not implemented for LightningModule")
     
@@ -162,7 +175,7 @@ class MoleculeModule(pl.LightningModule):
         return self.model(x, *args, **kwargs)
     
     def configure_optimizers(self):
-        model_params = self.model.predictor.parameters()
+        model_params = self.model.encoder.parameters()
         opt_learning_rate = self.config.learning_rate
 
         model_opt = torch.optim.Adam(
@@ -188,23 +201,32 @@ class MoleculeModule(pl.LightningModule):
         return [model_opt], [lr_schedule]
 
     def training_step(self, batch, batch_idx):
-        outputs = self(batch, compute_loss=True)
+        *data, targets = batch
+        outputs = self.model(batch)
+        #loss = self.loss_fn(output, target)
+        #mae = loss
         return outputs.loss
     
     def validation_step(self, batch, batch_idx):
-        outputs = self.model(batch, compute_loss=True)
-        self.valid_mae += outputs.mae
+        *data, targets = batch
+        #images, label = batch
+        #print(images.shape)
+        #print(label.shape)
+        #exit()
+        #x, target = batch
+        outputs = self.model(batch)
+        #self.valid_mae += outputs.m
         self.outputs = outputs
     
-    def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        return {k: v.to(device) for k, v in batch.items()}
+    #def transfer_batch_to_device(self, batch, device, dataloader_idx):
+    #    return {k: v.to(device) for k, v in batch.items()}
         
     def on_fit_start(self):
 
 
-        # Try to restore model and optimizer from checkpoint
+        # Try to restore model and optimizer from checkpoint (removed)
         start_epoch = 1
-        best_valid_mae = 1e12
+        #best_valid_mae = 1e12
 
         train_iter = (start_epoch - 1) * (
             self.n_train // self.config.batch_size
@@ -213,7 +235,7 @@ class MoleculeModule(pl.LightningModule):
         print("Starting training at epoch = {}, iter = {}".format(start_epoch, train_iter))
 
 
-        report_all = defaultdict(list) 
+        #report_all = defaultdict(list) 
         '''
         # Saving model at epoch 0 before training
         print("saving model at epoch 0 before training ... ")
@@ -222,21 +244,23 @@ class MoleculeModule(pl.LightningModule):
         '''
 
     def on_train_start(self):
-        start_t = time.perf_counter()
+        pass
+        #start_t = time.perf_counter()
 
         #iters_per_epoch = len(dataloaders["train"])
-        last_valid_loss = 1000.0
+        #last_valid_loss = 1000.0
 
-    def on_validation_epoch_start(self):
-        self.valid_mae = 0.0
+    #def on_validation_epoch_start(self):
+    #    self.valid_mae = 0.0
     
     def on_validation_epoch_end(self):
-        outputs = self.outputs
+        pass
+        #outputs = self.outputs
 
-        self.valid_mae /= self.n_valid
-        outputs["reports"].valid_mae = self.valid_mae
-        reports = parse_reports(self.outputs.reports)
-        print(reports)
+        #self.valid_mae /= self.n_valid
+        #outputs["reports"].valid_mae = self.valid_mae
+        #reports = parse_reports(self.outputs.reports)
+        #print(reports)
 
         # TODO: all this logging and checkpointing should somewhere else...
         '''
@@ -304,67 +328,29 @@ class MoleculeModule(pl.LightningModule):
 '''
 
 
-
-# @forge.debug_on(Exception)
 def main():
     # Parse flags
     config = forge.config()
     #print(config.__dict__['__flags'])
 
-    config.run_name = "quaternions_test"
-    config.model_config = "configs/molecule/eqv_transformer_model.py"
-    config.model_seed = 0
-    config.data_seed = 0
-    config.batch_fit = 4000
-    config.task = "mu"
-    config.data_augmentation = True
-    config.learning_rate = 1e-3
-    config.lr_schedule = "cosine"
-    config.warmup_length = 0.01
-    config.lr_floor = 0
-    config.subsample_trainset = 1.0
-    config.train_epochs = 500
-    config.batch_size = 100
-    config.num_heads = 8
-    config.dim_hidden = 1504
-    config.num_layers = 6
-    config.kernel_type = '2232'
-    config.kernel_dim = 6
-    config.lift_samples = 4
-    config.feature_embed_dim = 8
-    config.mc_samples = 25
-    config.fill = 0.5
-    config.block_norm = "layer_pre"
-    config.kernel_norm = "none"
-    config.output_norm = "none"
-    config.architecture = "lieconv"
-    config.attention_fn = "dot_product"
-    config.parameter_count = False
-    config.max_sample_norm = 1e6
-    config.use_pseudo = True
-    config.dual_quaternions = False
-    config.positive_quaternions = True
-    config.log_train_values = False
-
     # Load data
-    dataloaders, num_species, charge_scale, ds_stats, data_name = fet.load(
-        config.data_config, config=config
-    )
+    #dataloaders, num_species, charge_scale, ds_stats, data_name = fet.load(
+    #    config.data_config, config=config
+    #)
+    s2cnn_mnist_path = "/home/elias/phd/courses/mma440/project/s2cnn/examples/mnist"
+    #MNIST_PATH = os.path.join(s2cnn_mnist_path, "s2_mnist.gz")
+    #MNIST_PATH = os.path.join(s2cnn_mnist_path, "s2_mnist_norot.gz")
+    MNIST_PATH = os.path.join(s2cnn_mnist_path, "s2_mnist_norot_bw10.gz")
 
-    config.num_species = num_species
-    config.charge_scale = charge_scale
-    config.ds_stats = ds_stats
+    train_loader, test_loader, train_dataset, test_dataset = load_data(
+        MNIST_PATH, config.batch_size)
 
-    print("num_species", num_species)
-    print("charge_scale", charge_scale)
-    print("ds_stats", ds_stats)
-    exit()
+    # ds_stats: normalisation mean and variance of the targets. If None, do no normalisation.
+    #config.ds_stats = None
 
     # Load model
     model, model_name = fet.load(config.model_config, config)
 
-    config.charge_scale = float(config.charge_scale.numpy())
-    config.ds_stats = [float(stat.numpy()) for stat in config.ds_stats]
 
     # Prepare environment
     run_name = (
@@ -375,8 +361,8 @@ def main():
         + str(config.learning_rate)
     )
 
-    if config.batch_fit != 0:
-        run_name += "_bf" + str(config.batch_fit)
+    #if config.batch_fit != 0:
+    #    run_name += "_bf" + str(config.batch_fit)
 
     if config.lr_schedule != "none":
         run_name += "_" + config.lr_schedule
@@ -384,20 +370,21 @@ def main():
     # Print flags
     fet.print_flags()
 
+    data_name = "mnist"
 
     # set up results folders
-    results_folder_name = osp.join(
+    results_folder_name = os.path.join(
         data_name,
         model_name,
         run_name,
     )
 
-    logdir = osp.join(config.results_dir, results_folder_name.replace(".", "_"))
+    logdir = os.path.join(config.results_dir, results_folder_name.replace(".", "_"))
     logdir, resume_checkpoint = fet.init_checkpoint(
         logdir, config.data_config, config.model_config, config.resume
     )
 
-    checkpoint_name = osp.join(logdir, "model.ckpt")
+    checkpoint_name = os.path.join(logdir, "model.ckpt")
 
     # Setup tensorboard writing
     summary_writer = SummaryWriter(logdir)
@@ -405,13 +392,13 @@ def main():
     num_params = param_count(model)
     print(f"{model_name} parameters: {num_params:.5e}")
 
-    n_train = len(dataloaders["train"].dataset)
-    n_valid = len(dataloaders["valid"].dataset)
+    n_train = len(train_dataset)
+    n_valid = len(test_dataset)
 
-    model = MoleculeModule(model, config, summary_writer, checkpoint_name, n_train, n_valid)
-    trainer = pl.Trainer(default_root_dir=logdir, max_epochs=config.train_epochs, strategy='ddp')
+    model = SphericalMNISTModule(model, config, summary_writer, checkpoint_name, n_train, n_valid)
+    trainer = pl.Trainer(default_root_dir=logdir, max_epochs=config.train_epochs)
 
-    trainer.fit(model=model, train_dataloaders=dataloaders["train"], val_dataloaders=dataloaders["valid"])
+    trainer.fit(model=model, train_dataloaders=train_loader, val_dataloaders=test_loader)
     #trainer.test(model=model)
     '''
     #for epoch in tqdm(range(start_epoch, config.train_epochs + 1)):
