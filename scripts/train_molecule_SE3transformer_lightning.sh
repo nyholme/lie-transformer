@@ -33,7 +33,8 @@ python scripts/train_molecule_lightning.py \
     --model_seed $modelseed \
     --data_seed $dataseed \
     --batch_fit 4000 \
-    --task $task \
+    #--task $task \
+    --task homo \
     --data_augmentation True \
     --learning_rate $lr \
     --lr_schedule $lr_schedule \

@@ -314,6 +314,41 @@ def main():
     config = forge.config()
     #print(config.__dict__['__flags'])
 
+    config.run_name = "quaternions_test"
+    config.model_config = "configs/molecule/eqv_transformer_model.py"
+    config.model_seed = 0
+    config.data_seed = 0
+    config.batch_fit = 4000
+    config.task = "mu"
+    config.data_augmentation = True
+    config.learning_rate = 1e-3
+    config.lr_schedule = "cosine"
+    config.warmup_length = 0.01
+    config.lr_floor = 0
+    config.subsample_trainset = 1.0
+    config.train_epochs = 500
+    config.batch_size = 100
+    config.num_heads = 8
+    config.dim_hidden = 1504
+    config.num_layers = 6
+    config.kernel_type = '2232'
+    config.kernel_dim = 6
+    config.lift_samples = 4
+    config.feature_embed_dim = 8
+    config.mc_samples = 25
+    config.fill = 0.5
+    config.block_norm = "layer_pre"
+    config.kernel_norm = "none"
+    config.output_norm = "none"
+    config.architecture = "lieconv"
+    config.attention_fn = "dot_product"
+    config.parameter_count = False
+    config.max_sample_norm = 1e6
+    config.use_pseudo = True
+    config.dual_quaternions = False
+    config.positive_quaternions = True
+    config.log_train_values = False
+
     # Load data
     dataloaders, num_species, charge_scale, ds_stats, data_name = fet.load(
         config.data_config, config=config
@@ -372,7 +407,7 @@ def main():
     n_valid = len(dataloaders["valid"].dataset)
 
     model = MoleculeModule(model, config, summary_writer, checkpoint_name, n_train, n_valid)
-    trainer = pl.Trainer(default_root_dir=logdir, max_epochs=config.train_epochs)
+    trainer = pl.Trainer(default_root_dir=logdir, max_epochs=config.train_epochs, strategy='ddp')
 
     trainer.fit(model=model, train_dataloaders=dataloaders["train"], val_dataloaders=dataloaders["valid"])
     #trainer.test(model=model)
